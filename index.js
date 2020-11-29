@@ -10,9 +10,10 @@ const Discord = require("discord.js");
 const config = require("./config.json");
 const gTTS = require('gtts');
 const fs = require('fs');
+require('log-timestamp');
 
 const prefix = "~";
-const client = new Discord.Client();
+var client = undefined;
 
 const TTS_LANGUAGES = {
     'af': 'Afrikaans',
@@ -69,9 +70,24 @@ const TTS_LANGUAGES = {
 }
 
 var isBusy = false;
+var isConnected = false;
+
+process.on('unhandledRejection', function(err) {
+    console.log(err);
+});
 
 function playAudioHelper(connection, file) {
+    if(!isConnected) {
+        return;
+    }
     const dispatcher = connection.play(file);
+    connection.on('error', error => {
+        if(isConnected) {
+            isConnected = false;
+            console.log("Voice channel disconnected.");
+            connect();
+        }
+    })
     dispatcher.on("finish", end => {
         isBusy = false;
     });
@@ -136,13 +152,13 @@ function handleTTS(message, command, subCommand, args, messageText) {
 }
 
 function handleRoll(message, command, subCommand, args, messageText) {
-    var rollSideString = messageText.trim();
-    if(messageText == '') {
+    if(messageText.trim() == '') {
         messageText = '6';
     }
+    var rollSideString = messageText.trim();
     if(!isNaN(Number(rollSideString))) {
         numSides = parseInt(Number(rollSideString));
-        message.channel.send(Math.floor((Math.random() * numSides) + 1));
+        message.channel.send("Rolled a " + numSides + " sided die and got " + Math.floor((Math.random() * numSides) + 1));
     }
     else {
         message.reply("That's not a number.");
@@ -169,7 +185,7 @@ function handleSara(message, command, subCommand, args, messageText) {
     playAudio(message.member.voice.channel, './sara/' + fileToPlay);
 }
 
-client.on("message", function(message) {
+function handleClientMessage(message) {
     // Ignore all bots
     if(message.author.bot) { 
         return;
@@ -219,7 +235,30 @@ client.on("message", function(message) {
         handleSara(message, command, subCommand, args, messageText);
     }
 
-});
-client.login(config.BOT_TOKEN);
+}
 
-console.log("Connected.");
+function handleClientError(error) {
+    isConnected = false;
+    client.destroy();
+    console.error("Connection error. Going to try again in 2 seconds...");
+    setTimeout(connect, 2000);
+}
+
+function connect() {
+    console.log("Attempting to connect...");
+    if(client != undefined) {
+        client.destroy();
+    }
+    client = new Discord.Client();
+    client.on("message", handleClientMessage);
+    client.on("ready", () => {
+        console.log("Client connected.");
+        isConnected = true;
+    });
+    client.login(config.BOT_TOKEN).catch(error => {
+        console.error("Could not login.");
+        handleClientError(error);
+    });
+}
+
+connect();
