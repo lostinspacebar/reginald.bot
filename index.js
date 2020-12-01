@@ -81,13 +81,6 @@ function playAudioHelper(connection, file) {
         return;
     }
     const dispatcher = connection.play(file);
-    connection.on('error', error => {
-        if(isConnected) {
-            isConnected = false;
-            console.log("Voice channel disconnected.");
-            connect();
-        }
-    })
     dispatcher.on("finish", end => {
         isBusy = false;
     });
@@ -99,7 +92,17 @@ function playAudio(voiceChannel, file) {
         playAudioHelper(connection, file);
     }
     else {
-        voiceChannel.join().then(connection => playAudioHelper(connection, file)).catch(err => console.log(err));
+        voiceChannel.join().then(connection => {
+            console.log('no voice connection yet to ' + voiceChannel.id + '. joined channel.');
+            connection.on('error', error => {
+                if(isConnected) {
+                    isConnected = false;
+                    console.log("Voice channel disconnected.");
+                    connect();
+                }
+            });
+            playAudioHelper(connection, file);
+        }).catch(err => console.log(err));
     }
 }
 
