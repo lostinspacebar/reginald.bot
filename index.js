@@ -173,9 +173,11 @@ async function joinChannel(voiceChannel) {
             if (speaking.bitfield == 0) {
                 return;
             }
+            console.log(`Beta = ${isBeta}`);
             if (isBeta == false) {
                 return;
             }
+            
     
             var recordFile = `record/voice-${Date.now()}.raw`;
             var waveFile = recordFile + '.wav';
@@ -184,7 +186,6 @@ async function joinChannel(voiceChannel) {
             audioStream.pipe(ws);
             audioStream.on('error', e => console.error(e));
             audioStream.on('end', () => {
-                console.log('finished speaking');
                 convertSpeechToWav(recordFile, waveFile)
                     .then(waveFile => {
                         speechToText(waveFile)
@@ -192,6 +193,7 @@ async function joinChannel(voiceChannel) {
                                 for(var result of results) {
                                     if(result.text != undefined) {
                                         var speechText = result.text.trim();
+                                        console.log(`Got speech: ${speechText}`);
                                         if(speechText.startsWith('hey reginald')) {
                                             handleVoiceCommand(voiceChannel, speechText);
                                         }
@@ -443,7 +445,7 @@ function handleClientMessage(message) {
         handleSara(message, command, subCommand, args, messageText);
     }
     else if(command == "beta") {
-        //isBeta = ~isBeta;
+        isBeta = ~isBeta;
     }
 }
 
