@@ -1,8 +1,21 @@
 version: '3'
 
 services:
+  vosk-service:
+    container_name: vosk
+    image: alphacep/kaldi-en:latest
+    networks:
+      - reginald-net
+    ports:
+      - "2700:2700"
   reginald-service:
+    container_name: reginald
     build: .
     volumes:
       - ./:/app
+      - /app/node_modules
     working_dir: /app
+    networks:
+      - reginald-net
+networks:
+  reginald-net:

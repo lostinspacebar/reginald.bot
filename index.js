@@ -10,6 +10,10 @@ const Discord = require("discord.js");
 const config = require("./config.json");
 const gTTS = require('gtts');
 const fs = require('fs');
+const ffmpeg = require('fluent-ffmpeg');
+const websocket = require('ws');
+const { exec } = require("child_process");
+
 require('log-timestamp');
 
 const prefix = "~";
@@ -71,39 +75,200 @@ const TTS_LANGUAGES = {
 
 var isBusy = false;
 var isConnected = false;
+var isBeta = false;
 
 process.on('unhandledRejection', function(err) {
     console.log(err);
 });
 
-function playAudioHelper(connection, file) {
-    if(!isConnected) {
+async function handleVoiceCommand(voiceChannel, voiceCommand) {
+    if(isBusy) {
         return;
     }
-    const dispatcher = connection.play(file);
-    dispatcher.on("finish", end => {
-        isBusy = false;
+    if(voiceCommand.includes("sing me a song")) {
+        console.log('singing song');
+        var files = [];
+        var entries = fs.readdirSync(`./songs`, { withFileTypes: true });
+        for(var entry of entries) {
+            if(entry.isFile()) {
+                files.push(`./songs/${entry.name}`);
+            }
+        }
+        
+        if(files.length > 0) {
+            var fileToPlay = files[Math.floor(Math.random() * files.length)];
+            exec(`text2wave -mode singing -o song.wav ${fileToPlay}`, (error, stdout, stderr) => {
+                console.log('Generated song file.');
+                if(error) {
+                    console.log(error);
+                } else {
+                    sayTTS(voiceChannel, 'here goes nothing')
+                        .then(async () => {
+                            console.log('here');
+                            playAudio(voiceChannel, './song.wav')
+                                .then(() => sayTTS(voiceChannel, 'thank you'))
+                                .catch(error => console.error(error));
+                        })
+                        .catch(error => {
+                            console.log(error);
+                        })
+                }
+            });
+        }
+    }
+}
+
+function convertSpeechToWav(inputFile, outputFile) {
+    return new Promise((resolve, reject) => {
+    ffmpeg(inputFile)
+        .inputOptions(['-f s16le', '-ar 48k', '-ac 2'])
+        .output(outputFile)
+        .outputOptions(['-filter:a loudnorm', '-ar 8k', '-ac 1'])
+        .on('end', function() {
+            resolve(outputFile);
+        })
+        .on('error', err => {
+            reject(err);
+        })
+        .run();
     });
 }
 
-function playAudio(voiceChannel, file) {
-    var connection = client.voice.connections.find(conn => conn.channel.id == voiceChannel.id);
-    if(connection != undefined) {
-        playAudioHelper(connection, file);
-    }
-    else {
-        voiceChannel.join().then(connection => {
-            console.log('no voice connection yet to ' + voiceChannel.id + '. joined channel.');
-            connection.on('error', error => {
-                if(isConnected) {
-                    isConnected = false;
-                    console.log("Voice channel disconnected.");
-                    connect();
-                }
+function speechToText(inputFile) {
+    return new Promise((resolve, reject) => {
+        var results = [];
+        vosk_ws = new websocket('ws://vosk:2700');
+        vosk_ws.on('open', function open() {
+            var readStream = fs.createReadStream(inputFile);
+            readStream.on('data', function (chunk) {
+                vosk_ws.send(chunk);
             });
-            playAudioHelper(connection, file);
-        }).catch(err => console.log(err));
+            readStream.on('end', function () {
+                vosk_ws.send('{"eof" : 1}');
+            });
+        });
+        vosk_ws.on('message', function incoming(data) {
+            results.push(JSON.parse(data));
+        });
+        vosk_ws.on('error', error => reject(error));
+        vosk_ws.on('close', () => resolve(results));
+    });
+}
+
+/**
+ * Joins the specified voice channel if not already in it.
+ */
+async function joinChannel(voiceChannel) {
+    var connection = client.voice.connections.find(conn => conn.channel.id == voiceChannel.id);
+    if(connection == undefined) {
+        connection = await voiceChannel.join();
+        connection.on('error', error => {
+            if(isConnected) {
+                isConnected = false;
+                console.log("Voice channel disconnected.");
+                connect();
+            }
+        });
+        connection.on('speaking', async(user, speaking) => {
+            if (speaking.bitfield == 0) {
+                return;
+            }
+            if (isBeta == false) {
+                return;
+            }
+    
+            var recordFile = `record/voice-${Date.now()}.raw`;
+            var waveFile = recordFile + '.wav';
+            let ws = fs.createWriteStream(recordFile);
+            const audioStream = connection.receiver.createStream(user, { mode: 'pcm'});
+            audioStream.pipe(ws);
+            audioStream.on('error', e => console.error(e));
+            audioStream.on('end', () => {
+                console.log('finished speaking');
+                convertSpeechToWav(recordFile, waveFile)
+                    .then(waveFile => {
+                        speechToText(waveFile)
+                            .then(results => {
+                                for(var result of results) {
+                                    if(result.text != undefined) {
+                                        var speechText = result.text.trim();
+                                        if(speechText.startsWith('hey reginald')) {
+                                            handleVoiceCommand(voiceChannel, speechText);
+                                        }
+                                    }
+                                }
+                                fs.unlinkSync(recordFile);
+                                fs.unlinkSync(waveFile);
+                            })
+                            .catch(err => {
+                                console.log("Transcribe failed.");
+                                console.log(err);
+                            })
+                    })
+                    .catch(err => {
+                        console.log("File conversion failed.");
+                        console.log(err);
+                    });
+                
+            });
+        });
     }
+    return connection;
+}
+
+/**
+ * Plays the specified audio file over the discord voice channel. Connects to voice channel if needed.
+ * 
+ * @param {VoiceChannel} voiceChannel 
+ * @param {string} file 
+ */
+function playAudio(voiceChannel, file) {
+    return new Promise((resolve, reject) => {
+        joinChannel(voiceChannel)
+            .then(connection => {
+                if(!isConnected) {
+                    return;
+                }
+                const dispatcher = connection.play(file);
+                dispatcher.on("finish", end => {
+                    isBusy = false;
+                    resolve();
+                });
+            })
+            .catch(error => {
+                console.error(`Error joining voice channel ${voiceChannel.name}.`);
+                console.error(error);
+                reject();
+            });
+    });
+}
+
+function sayTTS(voiceChannel, text, language = 'en') {
+    return new Promise((resolve, reject) => {
+        isBusy = true;
+        var fileToPlay = undefined;
+        if(language == 'en') {
+            text = text.replace(/'/g, "\\'");
+            text = text.replace(/"/g, `\\"`);
+            exec(`echo ${text} | text2wave -o tts.wav`, (error, stdout, stderr) => {
+                if(error) {
+                    console.log(error);
+                }
+                fileToPlay = './tts.wav';
+                playAudio(voiceChannel, fileToPlay)
+                    .then(() => resolve())
+                    .catch(error => reject(error));
+            });
+        } else {
+            var gtts = new gTTS(text, language);
+            gtts.save('./tts.mp3', function (error, result) { 
+                if(error) { 
+                    console.log(error);
+                }
+                fileToPlay = './tts.mp3';
+            });
+        }
+    });
 }
 
 function handleTTS(message, command, subCommand, args, messageText) {
@@ -113,6 +278,10 @@ function handleTTS(message, command, subCommand, args, messageText) {
     if(!message.member.voice.channel)
     {
         return message.reply("You have to be in a voice channel.");
+    }
+    if(messageText.trim() == '')
+    {
+        return message.reply("Usage: ~tts some text here.");
     }
     if(subCommand == '') {
         subCommand = 'say';
@@ -126,16 +295,8 @@ function handleTTS(message, command, subCommand, args, messageText) {
                 language = languageArg;
             }
         }
-
-        isBusy = true;
-        var gtts = new gTTS(messageText.trim(), language);
-        gtts.save('./tts.mp3', function (err, result) { 
-            if(err) { 
-                throw new Error(err); 
-            }
-            playAudio(message.member.voice.channel, './tts.mp3');
-        });
-    } 
+        sayTTS(message.member.voice.channel, messageText.trim(), language);
+    }
     else if(subCommand == 'help') {
         var languageList = "";
         for(var languageCode in TTS_LANGUAGES) {
@@ -152,6 +313,48 @@ function handleTTS(message, command, subCommand, args, messageText) {
             );
         message.channel.send(helpEmbed);
     }
+}
+
+/**
+ * Given a soundboard name and the category, returns a file to be played.
+ * @param {*} soundboard 
+ * @param {*} category 
+ */
+function getSoundboardFile(soundboard, category) {
+    // Figure out categories
+    var categories = [];
+    var dirEntries = fs.readdirSync(`./${soundboard}`, { withFileTypes: true });
+    for(var dirEnt of dirEntries) {
+        if(dirEnt.isDirectory()) {
+            categories.push(dirEnt.name);
+        }
+    }
+    
+    // Specific category or all categories.
+    var categoriesToInclude = [];
+    if(categories.indexOf(category) >= 0) {
+        categoriesToInclude.push(category);
+    } else {
+        categoriesToInclude = categories;
+    }
+
+    // Find candidate files.
+    var files = [];
+    for(var cat of categoriesToInclude) {
+        var entries = fs.readdirSync(`./${soundboard}/${cat}`, { withFileTypes: true });
+        for(var entry of entries) {
+            if(entry.isFile()) {
+                files.push(`${cat}/${entry.name}`);
+            }
+        }
+    }
+    
+    if(files.length > 0) {
+        var fileToPlay = files[Math.floor(Math.random() * files.length)];
+        return `./${soundboard}/${fileToPlay}`;
+    }
+
+    return undefined;
 }
 
 function handleRoll(message, command, subCommand, args, messageText) {
@@ -173,9 +376,10 @@ function handleSoprano(message, command, subCommand, args, messageText) {
     {
         return message.reply("You have to be in a voice channel.");
     }
-    var files = fs.readdirSync('./sop/');
-    var fileToPlay = files[Math.floor(Math.random() * files.length)];
-    playAudio(message.member.voice.channel, './sop/' + fileToPlay);
+    var fileToPlay = getSoundboardFile('sop');
+    if(fileToPlay != undefined) {
+        playAudio(message.member.voice.channel, fileToPlay);
+    }
 }
 
 function handleSara(message, command, subCommand, args, messageText) {
@@ -183,9 +387,10 @@ function handleSara(message, command, subCommand, args, messageText) {
     {
         return message.reply("You have to be in a voice channel.");
     }
-    var files = fs.readdirSync('./sara/');
-    var fileToPlay = files[Math.floor(Math.random() * files.length)];
-    playAudio(message.member.voice.channel, './sara/' + fileToPlay);
+    var fileToPlay = getSoundboardFile('sara');
+    if(fileToPlay != undefined) {
+        playAudio(message.member.voice.channel, fileToPlay);
+    }
 }
 
 function handleClientMessage(message) {
@@ -237,7 +442,9 @@ function handleClientMessage(message) {
     else if(command == "sara" || command == "jamie") {
         handleSara(message, command, subCommand, args, messageText);
     }
-
+    else if(command == "beta") {
+        //isBeta = ~isBeta;
+    }
 }
 
 function handleClientError(error) {
